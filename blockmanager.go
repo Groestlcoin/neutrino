@@ -54,6 +54,10 @@ const (
 type filterStoreLookup func(*ChainService) *headerfs.FilterHeaderStore
 
 var (
+	// bigOne is 1 represented as a big.Int.  It is defined here to avoid
+	// the overhead of creating it multiple times.
+	bigOne = big.NewInt(1)
+
 	// filterTypes is a map of filter types to synchronize to a lookup
 	// function for the service's store for that filter type.
 	filterTypes = map[wire.FilterType]filterStoreLookup{
@@ -2833,57 +2837,62 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 
 	lastNode := hList.Back()
 
-	// Genesis block.
-	if lastNode == nil {
+	// Not enough blocks mined to calculate difficulty. Note: There is no
+	// off-by-one error here, genesis block is not used in the calculation.
+	if lastNode == nil || lastNode.Height < b.blocksPerRetarget {
 		return b.cfg.ChainParams.PowLimitBits, nil
 	}
 
-	// Return the previous block's difficulty requirements if this block
-	// is not at a difficulty retarget interval.
-	if (lastNode.Height+1)%b.blocksPerRetarget != 0 {
-		// For networks that support it, allow special reduction of the
-		// required difficulty once too much time has elapsed without
-		// mining a block.
-		if b.cfg.ChainParams.ReduceMinDifficulty {
-			// Return minimum difficulty when more than the desired
-			// amount of time has elapsed without mining a block.
-			reductionTime := int64(
-				b.cfg.ChainParams.MinDiffReductionTime /
-					time.Second)
-			allowMinTime := lastNode.Header.Timestamp.Unix() +
-				reductionTime
-			if newBlockTime.Unix() > allowMinTime {
-				return b.cfg.ChainParams.PowLimitBits, nil
-			}
-
-			// The block was mined within the desired timeframe, so
-			// return the difficulty for the last block which did
-			// not have the special minimum difficulty rule applied.
-			prevBits, err := b.findPrevTestNetDifficulty(hList)
-			if err != nil {
-				return 0, err
-			}
-			return prevBits, nil
-		}
-
-		// For the main network (or any unrecognized networks), simply
-		// return the previous block's difficulty requirements.
-		return lastNode.Header.Bits, nil
+	// Do not bother calculating difficulty before switch to DGW3, because
+	// it is impossible to validate difficulty of the original DGW
+	// algorithm. Nice side effect: On regtest and simnet networks we can
+	// control number of instamineble blocks. Difficulty rises very quickly
+	// if we use DGW3 from the beginning. This happens due to small
+	// retarget window (of 24 blocks) unlike Bitcoin where it is 2016
+	// blocks.
+	if lastNode.Height+1 < b.cfg.ChainParams.DGW3SwitchHeight {
+		return b.cfg.ChainParams.PowLimitBits, nil
 	}
 
-	// Get the block node at the previous retarget (targetTimespan days
-	// worth of blocks).
-	firstNode, err := b.cfg.BlockHeaders.FetchHeaderByHeight(
-		uint32(lastNode.Height + 1 - b.blocksPerRetarget),
-	)
-	if err != nil {
-		return 0, err
+	// For networks that support it, allow special reduction of the
+	// required difficulty once too much time has elapsed without
+	// mining a block.
+	if b.cfg.ChainParams.ReduceMinDifficulty {
+		// Return minimum difficulty when more than the desired
+		// amount of time has elapsed without mining a block.
+		reductionTime := int64(b.cfg.ChainParams.MinDiffReductionTime / time.Second)
+		allowMinTime := lastNode.Header.Timestamp.Unix() + reductionTime
+		if newBlockTime.Unix() > allowMinTime {
+			return b.cfg.ChainParams.PowLimitBits, nil
+		}
+	}
+
+	// Calculate "DGW3 average" difficulty of the last 24 blocks.
+	node := lastNode
+	pastDiffAverage := blockchain.CompactToBig(node.Header.Bits)
+	countBlocks := big.NewInt(2)
+	var header *wire.BlockHeader
+	node = node.Prev()
+	for i := int32(1); i < b.blocksPerRetarget; i++ {
+		if node != nil {
+			header = &node.Header
+			node = node.Prev()
+		} else {
+			var err error
+			header, err = b.cfg.BlockHeaders.FetchHeaderByHeight(uint32(lastNode.Height - i))
+			if err != nil {
+				return 0, fmt.Errorf("unable to obtain previous block to calculate target: %v", err)
+			}
+		}
+		pastDiffAverage.Mul(pastDiffAverage, countBlocks)
+		pastDiffAverage.Add(pastDiffAverage, blockchain.CompactToBig(header.Bits))
+		countBlocks.Add(countBlocks, bigOne)
+		pastDiffAverage.Div(pastDiffAverage, countBlocks)
 	}
 
 	// Limit the amount of adjustment that can occur to the previous
 	// difficulty.
-	actualTimespan := lastNode.Header.Timestamp.Unix() -
-		firstNode.Timestamp.Unix()
+	actualTimespan := lastNode.Header.Timestamp.Unix() - header.Timestamp.Unix()
 	adjustedTimespan := actualTimespan
 	if actualTimespan < b.minRetargetTimespan {
 		adjustedTimespan = b.minRetargetTimespan
@@ -2892,12 +2901,12 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	}
 
 	// Calculate new target difficulty as:
-	//  currentDifficulty * (adjustedTimespan / targetTimespan)
+	//  pastDiffAverage * (adjustedTimespan / targetTimespan)
 	// The result uses integer division which means it will be slightly
 	// rounded down.  Bitcoind also uses integer division to calculate this
 	// result.
 	oldTarget := blockchain.CompactToBig(lastNode.Header.Bits)
-	newTarget := new(big.Int).Mul(oldTarget, big.NewInt(adjustedTimespan))
+	newTarget := new(big.Int).Mul(pastDiffAverage, big.NewInt(adjustedTimespan))
 	targetTimeSpan := int64(b.cfg.ChainParams.TargetTimespan /
 		time.Second)
 	newTarget.Div(newTarget, big.NewInt(targetTimeSpan))

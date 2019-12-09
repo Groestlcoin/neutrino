@@ -12,3 +12,10 @@ require (
 )
 
 go 1.13
+
+replace (
+	github.com/btcsuite/btcd => github.com/Groestlcoin/grsd v0.20.1-grs
+	github.com/btcsuite/btcutil => github.com/Groestlcoin/grsutil v0.5.0-grsd-0-8
+	github.com/btcsuite/btcwallet/wallet/txauthor => github.com/Groestlcoin/grswallet/wallet/txauthor v1.0.0-grs
+	github.com/btcsuite/btcwallet/wtxmgr => github.com/Groestlcoin/grswallet/wtxmgr v1.0.0-grs
+)

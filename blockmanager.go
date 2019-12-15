@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btclog"
 	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/btcutil/gcs"
 	"github.com/btcsuite/btcutil/gcs/builder"
@@ -2921,11 +2922,14 @@ func (b *blockManager) calcNextRequiredDifficulty(newBlockTime time.Time,
 	// newTarget since conversion to the compact representation loses
 	// precision.
 	newTargetBits := blockchain.BigToCompact(newTarget)
-	log.Debugf("Difficulty retarget at block height %d", lastNode.Height+1)
-	log.Debugf("Old target %08x (%064x)", lastNode.Header.Bits, oldTarget)
-	log.Debugf("New target %08x (%064x)", newTargetBits,
+	if log.Level() > btclog.LevelTrace {
+		return newTargetBits, nil
+	}
+	log.Tracef("Difficulty retarget at block height %d", lastNode.Height+1)
+	log.Tracef("Old target %08x (%064x)", lastNode.Header.Bits, oldTarget)
+	log.Tracef("New target %08x (%064x)", newTargetBits,
 		blockchain.CompactToBig(newTargetBits))
-	log.Debugf("Actual timespan %v, adjusted timespan %v, target timespan %v",
+	log.Tracef("Actual timespan %v, adjusted timespan %v, target timespan %v",
 		time.Duration(actualTimespan)*time.Second,
 		time.Duration(adjustedTimespan)*time.Second,
 		b.cfg.ChainParams.TargetTimespan)
